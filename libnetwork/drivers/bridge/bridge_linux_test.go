@@ -12,6 +12,9 @@ import (
 
 	"github.com/docker/docker/internal/testutils/netnsutils"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/internal/netiputil"
+	"github.com/docker/docker/libnetwork/ipamapi"
+	"github.com/docker/docker/libnetwork/ipams/defaultipam"
 	"github.com/docker/docker/libnetwork/ipamutils"
 	"github.com/docker/docker/libnetwork/iptables"
 	"github.com/docker/docker/libnetwork/netlabel"
@@ -195,16 +198,19 @@ func compareBindings(a, b []types.PortBinding) bool {
 }
 
 func getIPv4Data(t *testing.T) []driverapi.IPAMData {
-	ipd := driverapi.IPAMData{AddressSpace: "full"}
-	nw, err := netutils.FindAvailableNetwork(ipamutils.GetLocalScopeDefaultNetworks())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ipd.Pool = nw
-	// Set network gateway to X.X.X.1
-	ipd.Gateway = types.GetIPNetCopy(nw)
-	ipd.Gateway.IP[len(ipd.Gateway.IP)-1] = 1
-	return []driverapi.IPAMData{ipd}
+	t.Helper()
+
+	a, _ := defaultipam.NewAllocator(ipamutils.GetLocalScopeDefaultNetworks(), nil)
+	alloc, err := a.RequestPool(ipamapi.PoolRequest{
+		AddressSpace: "LocalDefault",
+		Exclude:      netutils.InferReservedNetworks(false),
+	})
+	assert.NilError(t, err)
+
+	gw, _, err := a.RequestAddress(alloc.PoolID, nil, nil)
+	assert.NilError(t, err)
+
+	return []driverapi.IPAMData{{AddressSpace: "LocalDefault", Pool: netiputil.ToIPNet(alloc.Pool), Gateway: gw}}
 }
 
 func getIPv6Data(t *testing.T) []driverapi.IPAMData {
@@ -1113,9 +1119,13 @@ func TestCleanupIptableRules(t *testing.T) {
 	}
 
 	ipVersions := []iptables.IPVersion{iptables.IPv4, iptables.IPv6}
+	configs := map[iptables.IPVersion]configuration{
+		iptables.IPv4: {EnableIPTables: true},
+		iptables.IPv6: {EnableIP6Tables: true},
+	}
 
 	for _, version := range ipVersions {
-		if _, _, _, _, err := setupIPChains(configuration{EnableIPTables: true}, version); err != nil {
+		if _, _, _, _, err := setupIPChains(configs[version], version); err != nil {
 			t.Fatalf("Error setting up ip chains for %s: %v", version, err)
 		}
 
